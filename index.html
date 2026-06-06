@@ -27,12 +27,14 @@
     const app = initializeApp(firebaseConfig);
     const db  = collection(getFirestore(app), "messages");
     const MAX_MESSAGES = 50;
+    const TEN_MIN = 10 * 60 * 1000;
 
     const messagesEl = document.getElementById("messages");
 
-    function renderMessage(data) {
+    /* رسم رسالة مع أنيميشن ظهور سريع */
+    function renderMessage(data, animate) {
       const line = document.createElement("div");
-      line.className = "msg-line";
+      line.className = "msg-line" + (animate ? " msg-new" : "");
       const text = document.createElement("span");
       text.className = "msg-text";
       text.textContent = data.text;
@@ -40,22 +42,28 @@
       messagesEl.appendChild(line);
     }
 
+    /* الاستماع الفوري */
     const q = query(db, orderBy("timestamp", "asc"), limit(MAX_MESSAGES));
+    let firstLoad = true;
+
     onSnapshot(q, (snapshot) => {
       messagesEl.innerHTML = "";
-      snapshot.forEach(docSnap => renderMessage(docSnap.data()));
+      snapshot.forEach((docSnap, i) => {
+        renderMessage(docSnap.data(), !firstLoad);
+      });
+      firstLoad = false;
+      /* الفراغ في الأعلى: آخر رسالة تظهر في الأسفل */
       messagesEl.scrollTop = messagesEl.scrollHeight;
     });
 
+    /* حذف الأقدم عند تجاوز الحد */
     async function enforceLimit() {
       const snap = await getDocs(query(db, orderBy("timestamp", "asc")));
       if (snap.size >= MAX_MESSAGES)
         await deleteDoc(doc(getFirestore(app), "messages", snap.docs[0].id));
     }
 
-    /* حذف الرسائل التي مضى عليها أكثر من 10 دقائق */
-    const TEN_MIN = 10 * 60 * 1000;
-
+    /* حذف الرسائل منتهية الصلاحية (10 دقائق) */
     async function deleteExpiredMessages() {
       const snap = await getDocs(query(db, orderBy("timestamp", "asc")));
       const now = Date.now();
@@ -70,73 +78,59 @@
       if (deletions.length) await Promise.all(deletions);
     }
 
-    /* تشغيل الحذف فور فتح الصفحة ثم كل دقيقة */
     deleteExpiredMessages();
     setInterval(deleteExpiredMessages, 60 * 1000);
 
     const inputEl = document.getElementById("msg-input");
-    const sendBtn = document.getElementById("send-btn");
-    const statusEl = document.getElementById("status");
-
-    let sending = false;
 
     async function sendMessage() {
       const text = inputEl.value.trim();
       if (!text) return;
-      if (text.length > 500) { showStatus("الرسالة طويلة جداً"); return; }
-      if (sending) return;
+      if (text.length > 500) return;
 
-      sending = true;
-      sendBtn.disabled = true;
+      /* لا نعطّل الحقل حتى لا يختفي الكيبورد */
+      inputEl.value = "";
 
       try {
         await enforceLimit();
         await addDoc(db, { text, timestamp: serverTimestamp() });
-        inputEl.value = "";
-        showStatus("");
       } catch (err) {
-        showStatus("فشل الإرسال");
         console.error(err);
-      } finally {
-        sending = false;
-        sendBtn.disabled = false;
-        inputEl.focus();
       }
+
+      /* إبقاء التركيز على الحقل دائماً */
+      inputEl.focus();
     }
 
-    sendBtn.addEventListener("click", sendMessage);
     inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
     });
 
-    let statusTimer;
-    function showStatus(msg) {
-      statusEl.textContent = msg;
-      clearTimeout(statusTimer);
-      if (msg) statusTimer = setTimeout(() => { statusEl.textContent = ""; }, 3000);
-    }
+    /* منع إخفاء الكيبورد عند لمس منطقة الرسائل */
+    messagesEl.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+    }, { passive: false });
   </script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg:       #0b0f1a;
-      --bg2:      #0f1629;
-      --fg:       #e8eaf6;
-      --dim:      #6b7db3;
-      --border:   #1e2d50;
-      --hover-bg: #131d33;
-      --btn-bg:   #1e2d50;
-      --btn-hover:#2a3f70;
-      --accent:   #4a6fa5;
-      --font:     -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
-      --radius:   18px;
+      --bg:     #0b0f1a;
+      --bg2:    #0f1629;
+      --fg:     #e8eaf6;
+      --dim:    #6b7db3;
+      --border: #1e2d50;
+      --accent: #4a6fa5;
+      --font:   -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+      --radius: 18px;
     }
 
     html {
       touch-action: manipulation;
-      -ms-touch-action: manipulation;
       -webkit-text-size-adjust: 100%;
     }
 
@@ -159,7 +153,7 @@
       margin: 0 auto;
     }
 
-    /* ── MESSAGES ── */
+    /* الرسائل: flex-end يجعل الأولى في الأسفل والفراغ في الأعلى */
     #messages {
       flex: 1;
       overflow-y: auto;
@@ -169,29 +163,29 @@
       justify-content: flex-end;
       gap: 0.45rem;
       scroll-behavior: smooth;
+      overscroll-behavior: none;
     }
 
     #messages::-webkit-scrollbar { width: 4px; }
     #messages::-webkit-scrollbar-track { background: transparent; }
     #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
 
-    #messages:empty::after {
-      content: "ابدأ المحادثة...";
-      color: var(--dim);
-      font-size: 0.9rem;
-      padding-top: 1.5rem;
-      display: block;
-      text-align: center;
-    }
-
-    /* ── MSG BUBBLE — بدون إطار ── */
+    /* رسالة بدون إطار */
     .msg-line {
       display: inline-flex;
       align-self: flex-start;
-      background: transparent;
-      border: none;
       padding: 0.15rem 0.4rem;
       max-width: 90%;
+    }
+
+    /* أنيميشن ظهور الرسالة الجديدة */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .msg-new {
+      animation: fadeUp 0.18s ease-out forwards;
     }
 
     .msg-text {
@@ -201,24 +195,15 @@
       font-size: 1rem;
     }
 
-    /* ── INPUT AREA ── */
+    /* منطقة الإدخال */
     #input-area {
       flex-shrink: 0;
       padding: 0.75rem 1rem 1rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.35rem;
       background: var(--bg);
     }
 
-    #input-row {
-      display: flex;
-      align-items: center;
-      gap: 0.6rem;
-    }
-
     #msg-input {
-      flex: 1;
+      width: 100%;
       background: var(--bg2);
       border: 1.5px solid var(--border);
       border-radius: var(--radius);
@@ -230,49 +215,11 @@
       -webkit-user-drag: none;
       transition: border-color 0.15s;
       min-height: 52px;
+      display: block;
     }
 
     #msg-input:focus { border-color: var(--accent); }
-    #msg-input::placeholder { color: var(--dim); }
-    #msg-input:disabled { opacity: 0.5; cursor: not-allowed; }
-
-    /* ── SEND BUTTON ── */
-    #send-btn {
-      background: var(--btn-bg);
-      border: 1.5px solid var(--accent);
-      border-radius: 50%;
-      width: 52px;
-      height: 52px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-      transition: background 0.15s, transform 0.1s;
-    }
-
-    #send-btn:hover:not(:disabled) { background: var(--btn-hover); }
-    #send-btn:active:not(:disabled) { transform: scale(0.93); }
-    #send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
-    #send-btn svg {
-      width: 22px;
-      height: 22px;
-      color: var(--fg);
-      stroke: var(--fg);
-    }
-
-    /* ── STATUS ── */
-    #status {
-      font-size: 0.75rem;
-      color: var(--dim);
-      padding-inline-start: 0.5rem;
-      min-height: 1em;
-    }
-
-    @media (max-width: 600px) {
-      #msg-input { font-size: 1rem; }
-    }
+    #msg-input:disabled { opacity: 0.5; }
 
     body { -webkit-user-drag: none; }
   </style>
@@ -280,30 +227,19 @@
 </head>
 <body>
   <div id="app">
-
-
-<main id="messages" role="log" aria-live="polite"></main>
-
-<footer id="input-area">
-  <div id="input-row">
-    <input
-      id="msg-input"
-      type="text"
-      maxlength="500"
-      autocomplete="off"
-      autocorrect="off"
-      autocapitalize="off"
-      spellcheck="false"
-    />
-    <button id="send-btn" aria-label="إرسال">
-      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="5 15 12 8 19 15"/>
-      </svg>
-    </button>
-  </div>
-  <span id="status" aria-live="assertive"></span>
-</footer>
-
+    <main id="messages" role="log" aria-live="polite"></main>
+    <footer id="input-area">
+      <input
+        id="msg-input"
+        type="text"
+        maxlength="500"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        enterkeyhint="send"
+      />
+    </footer>
   </div>
 
   <script>
