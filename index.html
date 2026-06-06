@@ -78,13 +78,16 @@
     const sendBtn = document.getElementById("send-btn");
     const statusEl = document.getElementById("status");
 
+    let sending = false;
+
     async function sendMessage() {
       const text = inputEl.value.trim();
       if (!text) return;
       if (text.length > 500) { showStatus("الرسالة طويلة جداً"); return; }
+      if (sending) return;
 
+      sending = true;
       sendBtn.disabled = true;
-      inputEl.disabled = true;
 
       try {
         await enforceLimit();
@@ -95,8 +98,8 @@
         showStatus("فشل الإرسال");
         console.error(err);
       } finally {
+        sending = false;
         sendBtn.disabled = false;
-        inputEl.disabled = false;
         inputEl.focus();
       }
     }
@@ -163,6 +166,7 @@
       padding: 1rem 1rem 0.5rem;
       display: flex;
       flex-direction: column;
+      justify-content: flex-end;
       gap: 0.45rem;
       scroll-behavior: smooth;
     }
