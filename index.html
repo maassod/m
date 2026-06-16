@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8" />
@@ -119,12 +118,12 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg:     #0b0f1a;
-      --bg2:    #0f1629;
-      --fg:     #e8eaf6;
-      --dim:    #6b7db3;
-      --border: #1e2d50;
-      --accent: #4a6fa5;
+      --bg:     #000000; /* أسود 100% للخلفية الأساسية */
+      --bg2:    #000000; /* أسود 100% لحقل الإدخال */
+      --fg:     #ffffff; /* أبيض ناصع للنصوص لقراءة ممتازة */
+      --dim:    #888888; 
+      --border: #333333; /* رمادي غامق جداً للحدود الافتراضية */
+      --accent: #ffffff; /* أبيض للتركيز والحدود النشطة */
       --font:   -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
       --radius: 18px;
     }
@@ -151,6 +150,7 @@
       height: 100dvh;
       max-width: 860px;
       margin: 0 auto;
+      background: var(--bg);
     }
 
     /* الرسائل: flex-end يجعل الأولى في الأسفل والفراغ في الأعلى */
