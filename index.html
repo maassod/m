@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8" />
@@ -11,7 +12,7 @@
     import {
       getFirestore, collection, addDoc, query,
       orderBy, limit, onSnapshot, serverTimestamp,
-      getDocs, deleteDoc, doc, setDoc, getDoc
+      getDocs, deleteDoc, doc, setDoc, getDoc, updateDoc, arrayUnion
     } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
     const firebaseConfig = {
@@ -30,14 +31,14 @@
     }
 
     const app  = initializeApp(firebaseConfig);
-    const db   = collection(getFirestore(app), "messages");
     const fs   = getFirestore(app);
+    const db   = collection(fs, "messages");
     const MAX_MESSAGES = 50;
     const TEN_MIN = 10 * 60 * 1000;
 
-    const messagesEl  = document.getElementById("messages");
-    const glowEl      = document.getElementById("bottom-glow");
-    const typingEl    = document.getElementById("typing-indicator");
+    const messagesEl = document.getElementById("messages");
+    const glowEl     = document.getElementById("bottom-glow");
+    const typingEl   = document.getElementById("typing-indicator");
 
     /* ── helpers ── */
     function isNearBottom() {
@@ -53,15 +54,82 @@
       if (isNearBottom()) hideGlow();
     }, { passive: true });
 
+    /* ── mark messages as read ── */
+    // Track message IDs we've already marked to avoid redundant writes
+    const markedRead = new Set();
+
+    async function markVisibleAsRead() {
+      // Find all message elements that belong to others
+      const lines = messagesEl.querySelectorAll(".msg-line[data-sid]");
+      for (const line of lines) {
+        const sid    = line.getAttribute("data-sid");
+        const msgId  = line.id;
+        if (!msgId || sid === sessionId) continue;   // skip own messages
+        if (markedRead.has(msgId)) continue;          // already done
+
+        // Check if in viewport
+        const rect = line.getBoundingClientRect();
+        const inView = rect.top < window.innerHeight && rect.bottom > 0;
+        if (!inView) continue;
+
+        markedRead.add(msgId);
+        try {
+          await updateDoc(doc(fs, "messages", msgId), {
+            readBy: arrayUnion(sessionId)
+          });
+        } catch(e) { /* doc may have been deleted */ }
+      }
+    }
+
+    // Mark on scroll and on focus
+    messagesEl.addEventListener("scroll", () => { markVisibleAsRead(); }, { passive: true });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) markVisibleAsRead();
+    });
+    window.addEventListener("focus", () => markVisibleAsRead());
+
+    /* ── dot color logic ──
+       own message:
+         - readBy includes at least one OTHER session → white  (seen)
+         - otherwise                                 → green  (sent, unseen)
+       other's message:
+         - always dim grey
+    ── */
+    function getDotState(data) {
+      const isOwn = data.sid === sessionId;
+      if (!isOwn) return "other";
+      const readBy = data.readBy || [];
+      const seenByOther = readBy.some(id => id !== sessionId);
+      return seenByOther ? "seen" : "sent";
+    }
+
+    /* ── render / update dot ── */
+    function updateDot(dotEl, state) {
+      dotEl.setAttribute("data-state", state);
+      // remove all state classes first
+      dotEl.classList.remove("dot-sent", "dot-seen", "dot-other");
+      dotEl.classList.add("dot-" + state);
+    }
+
     /* ── render message ── */
     function renderMessage(data, id, animate) {
+      const existing = document.getElementById(id);
+
+      if (existing) {
+        // Already rendered — just refresh dot state
+        const dot = existing.querySelector(".msg-dot");
+        if (dot) updateDot(dot, getDotState(data));
+        return;
+      }
+
       const line = document.createElement("div");
       line.id = id;
       line.className = "msg-line" + (animate ? " msg-new" : "");
+      line.setAttribute("data-sid", data.sid);
 
       const dot = document.createElement("span");
       dot.className = "msg-dot";
-      dot.setAttribute("data-own", data.sid === sessionId ? "1" : "0");
+      updateDot(dot, getDotState(data));
 
       const text = document.createElement("span");
       text.className = "msg-text";
@@ -69,7 +137,6 @@
 
       line.appendChild(dot);
       line.appendChild(text);
-      // insert before typing indicator
       messagesEl.insertBefore(line, typingEl);
     }
 
@@ -81,12 +148,12 @@
       const wasNearBottom = isNearBottom();
 
       snapshot.docChanges().forEach((change) => {
-        if (change.type === "added") {
-          const data   = change.doc.data();
-          const isOwn  = data.sid === sessionId;
-          renderMessage(data, change.doc.id, !firstLoad);
+        if (change.type === "added" || change.type === "modified") {
+          const data  = change.doc.data();
+          const isOwn = data.sid === sessionId;
+          renderMessage(data, change.doc.id, change.type === "added" && !firstLoad);
 
-          if (!firstLoad) {
+          if (change.type === "added" && !firstLoad) {
             if (isOwn) {
               setTimeout(() => { scrollToBottom(); hideGlow(); }, 10);
             } else if (!wasNearBottom) {
@@ -104,6 +171,8 @@
         setTimeout(() => {
           messagesEl.scrollTop = messagesEl.scrollHeight;
           hideGlow();
+          // Mark visible messages as read on first load
+          setTimeout(markVisibleAsRead, 200);
         }, 10);
       }
       firstLoad = false;
@@ -148,7 +217,6 @@
       } catch (e) { console.error(e); }
     }
 
-    // watch others typing
     onSnapshot(typingDocRef, (snap) => {
       if (!snap.exists()) { typingEl.style.display = "none"; return; }
       const sessions = snap.data().sessions || {};
@@ -164,7 +232,6 @@
       }
     });
 
-    // input events
     const inputEl = document.getElementById("msg-input");
 
     inputEl.addEventListener("input", () => {
@@ -181,6 +248,7 @@
     inputEl.addEventListener("focus", () => {
       setTimeout(scrollToBottom, 150);
       hideGlow();
+      setTimeout(markVisibleAsRead, 300);
     });
 
     async function sendMessage() {
@@ -192,7 +260,12 @@
       setTyping(false);
       try {
         await enforceLimit();
-        await addDoc(db, { text, sid: sessionId, timestamp: serverTimestamp() });
+        await addDoc(db, {
+          text,
+          sid: sessionId,
+          timestamp: serverTimestamp(),
+          readBy: []          // ← initialise empty; others will add themselves
+        });
       } catch (err) { console.error(err); }
       inputEl.focus();
     }
@@ -201,7 +274,6 @@
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     });
 
-    // clean up typing on page leave
     window.addEventListener("beforeunload", () => setTyping(false));
   </script>
 
@@ -217,8 +289,11 @@
       --accent:    #ffffff;
       --font:      -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
       --radius:    18px;
-      --dot-own:   #ffffff;
-      --dot-other: #555555;
+
+      /* dot colours */
+      --dot-sent:  #4ade80;   /* green  – sent, not yet seen  */
+      --dot-seen:  #ffffff;   /* white  – seen by other       */
+      --dot-other: #555555;   /* grey   – message from other  */
     }
 
     html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
@@ -272,18 +347,34 @@
       max-width: 90%;
     }
 
+    /* ── dot ── */
     .msg-dot {
       flex-shrink: 0;
-      width: 3.5px;        /* 50% of original 7px */
+      width: 3.5px;
       height: 3.5px;
       border-radius: 50%;
-      background: var(--dot-other);
       position: relative;
       top: -0.05em;
-      transition: background 0.2s;
+      transition: background 0.4s ease, box-shadow 0.4s ease;
     }
 
-    .msg-dot[data-own="1"] { background: var(--dot-own); }
+    /* sent (green glow) */
+    .msg-dot.dot-sent {
+      background: var(--dot-sent);
+      box-shadow: 0 0 4px 1px rgba(74, 222, 128, 0.55);
+    }
+
+    /* seen (white) */
+    .msg-dot.dot-seen {
+      background: var(--dot-seen);
+      box-shadow: none;
+    }
+
+    /* other person's message (grey) */
+    .msg-dot.dot-other {
+      background: var(--dot-other);
+      box-shadow: none;
+    }
 
     @keyframes fadeUp {
       from { opacity: 0; transform: translateY(12px); }
@@ -368,11 +459,11 @@
 
     body { -webkit-user-drag: none; }
   </style>
+
 </head>
 <body>
   <div id="app">
     <main id="messages" role="log" aria-live="polite">
-      <!-- typing indicator lives inside the scroll area, always last -->
       <div id="typing-indicator" aria-label="...">
         <span class="typing-dot"></span>
         <span class="typing-dot"></span>
@@ -380,20 +471,23 @@
       </div>
     </main>
 
-    <div id="bottom-glow" aria-hidden="true"></div>
+```
+<div id="bottom-glow" aria-hidden="true"></div>
 
-    <footer id="input-area">
-      <input
-        id="msg-input"
-        type="text"
-        maxlength="500"
-        autocomplete="off"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        enterkeyhint="send"
-      />
-    </footer>
+<footer id="input-area">
+  <input
+    id="msg-input"
+    type="text"
+    maxlength="500"
+    autocomplete="off"
+    autocorrect="off"
+    autocapitalize="off"
+    spellcheck="false"
+    enterkeyhint="send"
+  />
+</footer>
+```
+
   </div>
 
   <script>
@@ -401,5 +495,6 @@
       document.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); });
     });
   </script>
+
 </body>
 </html>
