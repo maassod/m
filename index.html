@@ -30,9 +30,9 @@
       sessionStorage.setItem("chat_sid", sessionId);
     }
 
-    const app  = initializeApp(firebaseConfig);
-    const fs   = getFirestore(app);
-    const db   = collection(fs, "messages");
+    const app = initializeApp(firebaseConfig);
+    const fs  = getFirestore(app);
+    const db  = collection(fs, "messages");
     const MAX_MESSAGES = 50;
     const TEN_MIN = 10 * 60 * 1000;
 
@@ -40,7 +40,7 @@
     const glowEl     = document.getElementById("bottom-glow");
     const typingEl   = document.getElementById("typing-indicator");
 
-    /* ── helpers ── */
+    /* ── scroll helpers ── */
     function isNearBottom() {
       return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
     }
@@ -54,59 +54,93 @@
       if (isNearBottom()) hideGlow();
     }, { passive: true });
 
-    /* ── mark messages as read ── */
-    // Track message IDs we've already marked to avoid redundant writes
-    const markedRead = new Set();
+    /* ════════════════════════════════════════════
+       READ TRACKING
+       ────────────────────────────────────────────
+       - Use IntersectionObserver relative to #messages
+         so visibility is calculated correctly inside
+         the scroll container (not the window).
+       - Keep a Set of IDs already written to Firestore
+         so we don't spam writes, but reset it when
+         the page regains visibility (tab switch) so
+         we re-check on every re-open.
+       - Queue pending writes; flush with a small
+         debounce so rapid scrolling batches updates.
+    ════════════════════════════════════════════ */
+    const writtenToFirestore = new Set(); // IDs we've already persisted
+    const pendingWrites      = new Set(); // IDs queued but not yet written
+    let   writeTimer         = null;
 
-    async function markVisibleAsRead() {
-      // Find all message elements that belong to others
-      const lines = messagesEl.querySelectorAll(".msg-line[data-sid]");
-      for (const line of lines) {
-        const sid    = line.getAttribute("data-sid");
-        const msgId  = line.id;
-        if (!msgId || sid === sessionId) continue;   // skip own messages
-        if (markedRead.has(msgId)) continue;          // already done
+    async function flushPendingWrites() {
+      if (pendingWrites.size === 0) return;
+      const batch = [...pendingWrites];
+      pendingWrites.clear();
+      writeTimer = null;
 
-        // Check if in viewport
-        const rect = line.getBoundingClientRect();
-        const inView = rect.top < window.innerHeight && rect.bottom > 0;
-        if (!inView) continue;
-
-        markedRead.add(msgId);
+      for (const msgId of batch) {
         try {
           await updateDoc(doc(fs, "messages", msgId), {
             readBy: arrayUnion(sessionId)
           });
-        } catch(e) { /* doc may have been deleted */ }
+          writtenToFirestore.add(msgId);
+        } catch (e) {
+          // Doc deleted or network issue — remove from written set so we retry
+          writtenToFirestore.delete(msgId);
+        }
       }
     }
 
-    // Mark on scroll and on focus
-    messagesEl.addEventListener("scroll", () => { markVisibleAsRead(); }, { passive: true });
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) markVisibleAsRead();
-    });
-    window.addEventListener("focus", () => markVisibleAsRead());
-
-    /* ── dot color logic ──
-       own message:
-         - readBy includes at least one OTHER session → white  (seen)
-         - otherwise                                 → green  (sent, unseen)
-       other's message:
-         - always dim grey
-    ── */
-    function getDotState(data) {
-      const isOwn = data.sid === sessionId;
-      if (!isOwn) return "other";
-      const readBy = data.readBy || [];
-      const seenByOther = readBy.some(id => id !== sessionId);
-      return seenByOther ? "seen" : "sent";
+    function scheduleWrite(msgId) {
+      if (writtenToFirestore.has(msgId)) return; // already persisted
+      pendingWrites.add(msgId);
+      clearTimeout(writeTimer);
+      writeTimer = setTimeout(flushPendingWrites, 300); // debounce 300ms
     }
 
-    /* ── render / update dot ── */
+    /* IntersectionObserver: root = #messages scroll container */
+    const readObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const line = entry.target;
+        const sid  = line.getAttribute("data-sid");
+        if (!sid || sid === sessionId) return; // only track others' messages
+        scheduleWrite(line.id);
+      });
+    }, {
+      root: messagesEl,      // ← relative to scroll container, not window
+      threshold: 0.1         // 10% visible is enough
+    });
+
+    /* When tab comes back into focus, clear the in-memory written set
+       so messages are re-checked (in case we missed a write). */
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        // Re-queue anything not yet confirmed written
+        writtenToFirestore.clear();
+        // Re-observe all current messages
+        messagesEl.querySelectorAll(".msg-line[data-sid]").forEach(el => {
+          const sid = el.getAttribute("data-sid");
+          if (sid && sid !== sessionId) readObserver.observe(el);
+        });
+      }
+    });
+
+    /* Also trigger on any user interaction with the page */
+    ["click", "touchstart", "keydown", "mousemove"].forEach(evt => {
+      document.addEventListener(evt, () => {
+        // Re-queue unconfirmed writes on any interaction
+        if (pendingWrites.size > 0) flushPendingWrites();
+      }, { passive: true });
+    });
+
+    /* ── dot state ── */
+    function getDotState(data) {
+      if (data.sid !== sessionId) return "other";
+      const readBy = data.readBy || [];
+      return readBy.some(id => id !== sessionId) ? "seen" : "sent";
+    }
+
     function updateDot(dotEl, state) {
-      dotEl.setAttribute("data-state", state);
-      // remove all state classes first
       dotEl.classList.remove("dot-sent", "dot-seen", "dot-other");
       dotEl.classList.add("dot-" + state);
     }
@@ -116,14 +150,14 @@
       const existing = document.getElementById(id);
 
       if (existing) {
-        // Already rendered — just refresh dot state
+        // Update dot only (handles "modified" events from readBy changes)
         const dot = existing.querySelector(".msg-dot");
         if (dot) updateDot(dot, getDotState(data));
         return;
       }
 
       const line = document.createElement("div");
-      line.id = id;
+      line.id        = id;
       line.className = "msg-line" + (animate ? " msg-new" : "");
       line.setAttribute("data-sid", data.sid);
 
@@ -132,12 +166,17 @@
       updateDot(dot, getDotState(data));
 
       const text = document.createElement("span");
-      text.className = "msg-text";
+      text.className  = "msg-text";
       text.textContent = data.text;
 
       line.appendChild(dot);
       line.appendChild(text);
       messagesEl.insertBefore(line, typingEl);
+
+      // Start observing this element if it belongs to someone else
+      if (data.sid !== sessionId) {
+        readObserver.observe(line);
+      }
     }
 
     /* ── messages listener ── */
@@ -163,7 +202,7 @@
         }
         if (change.type === "removed") {
           const el = document.getElementById(change.doc.id);
-          if (el) el.remove();
+          if (el) { readObserver.unobserve(el); el.remove(); }
         }
       });
 
@@ -171,8 +210,6 @@
         setTimeout(() => {
           messagesEl.scrollTop = messagesEl.scrollHeight;
           hideGlow();
-          // Mark visible messages as read on first load
-          setTimeout(markVisibleAsRead, 200);
         }, 10);
       }
       firstLoad = false;
@@ -208,11 +245,8 @@
         const snap   = await getDoc(typingDocRef);
         const data   = snap.exists() ? snap.data() : {};
         const others = data.sessions || {};
-        if (isTyping) {
-          others[sessionId] = Date.now();
-        } else {
-          delete others[sessionId];
-        }
+        if (isTyping) { others[sessionId] = Date.now(); }
+        else          { delete others[sessionId]; }
         await setDoc(typingDocRef, { sessions: others });
       } catch (e) { console.error(e); }
     }
@@ -224,12 +258,8 @@
       const othersTyping = Object.entries(sessions).some(
         ([sid, ts]) => sid !== sessionId && (now - ts) < 5000
       );
-      if (othersTyping) {
-        typingEl.style.display = "flex";
-        if (isNearBottom()) setTimeout(scrollToBottom, 10);
-      } else {
-        typingEl.style.display = "none";
-      }
+      typingEl.style.display = othersTyping ? "flex" : "none";
+      if (othersTyping && isNearBottom()) setTimeout(scrollToBottom, 10);
     });
 
     const inputEl = document.getElementById("msg-input");
@@ -248,13 +278,11 @@
     inputEl.addEventListener("focus", () => {
       setTimeout(scrollToBottom, 150);
       hideGlow();
-      setTimeout(markVisibleAsRead, 300);
     });
 
     async function sendMessage() {
       const text = inputEl.value.trim();
-      if (!text) return;
-      if (text.length > 500) return;
+      if (!text || text.length > 500) return;
       inputEl.value = "";
       clearTimeout(typingTimeout);
       setTyping(false);
@@ -262,9 +290,9 @@
         await enforceLimit();
         await addDoc(db, {
           text,
-          sid: sessionId,
+          sid:       sessionId,
           timestamp: serverTimestamp(),
-          readBy: []          // ← initialise empty; others will add themselves
+          readBy:    []
         });
       } catch (err) { console.error(err); }
       inputEl.focus();
@@ -284,16 +312,13 @@
       --bg:        #000000;
       --bg2:       #111111;
       --fg:        #ffffff;
-      --dim:       #888888;
       --border:    #333333;
       --accent:    #ffffff;
       --font:      -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
       --radius:    18px;
-
-      /* dot colours */
-      --dot-sent:  #4ade80;   /* green  – sent, not yet seen  */
-      --dot-seen:  #ffffff;   /* white  – seen by other       */
-      --dot-other: #555555;   /* grey   – message from other  */
+      --dot-sent:  #4ade80;
+      --dot-seen:  #ffffff;
+      --dot-other: #555555;
     }
 
     html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
@@ -337,7 +362,6 @@
     #messages::-webkit-scrollbar-track { background: transparent; }
     #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
 
-    /* ── message row ── */
     .msg-line {
       display: inline-flex;
       align-items: baseline;
@@ -355,22 +379,17 @@
       border-radius: 50%;
       position: relative;
       top: -0.05em;
-      transition: background 0.4s ease, box-shadow 0.4s ease;
+      transition: background 0.5s ease, box-shadow 0.5s ease;
     }
 
-    /* sent (green glow) */
     .msg-dot.dot-sent {
       background: var(--dot-sent);
-      box-shadow: 0 0 4px 1px rgba(74, 222, 128, 0.55);
+      box-shadow: 0 0 5px 1.5px rgba(74, 222, 128, 0.6);
     }
-
-    /* seen (white) */
     .msg-dot.dot-seen {
       background: var(--dot-seen);
       box-shadow: none;
     }
-
-    /* other person's message (grey) */
     .msg-dot.dot-other {
       background: var(--dot-other);
       box-shadow: none;
@@ -399,8 +418,7 @@
     }
 
     .typing-dot {
-      width: 6px;
-      height: 6px;
+      width: 6px; height: 6px;
       border-radius: 50%;
       background: var(--dot-other);
       animation: bounce 1.2s ease-in-out infinite;
@@ -410,7 +428,7 @@
 
     @keyframes bounce {
       0%, 80%, 100% { transform: translateY(0);    opacity: 0.4; }
-      40%           { transform: translateY(-5px); opacity: 1;   }
+      40%            { transform: translateY(-5px); opacity: 1;   }
     }
 
     /* ── input area ── */
@@ -435,7 +453,7 @@
       transition: border-color 0.15s;
       min-height: 52px;
     }
-    #msg-input:focus   { border-color: var(--accent); }
+    #msg-input:focus    { border-color: var(--accent); }
     #msg-input:disabled { opacity: 0.5; }
 
     /* ── bottom glow ── */
@@ -471,7 +489,6 @@
       </div>
     </main>
 
-```
 <div id="bottom-glow" aria-hidden="true"></div>
 
 <footer id="input-area">
@@ -486,8 +503,6 @@
     enterkeyhint="send"
   />
 </footer>
-```
-
   </div>
 
   <script>
