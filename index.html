@@ -12,7 +12,7 @@
     import {
       getFirestore, collection, addDoc, query,
       orderBy, limit, onSnapshot, serverTimestamp,
-      getDocs, deleteDoc, doc, setDoc, getDoc, updateDoc, arrayUnion
+      getDocs, deleteDoc, doc
     } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
     const firebaseConfig = {
@@ -31,155 +31,51 @@
     }
 
     const app = initializeApp(firebaseConfig);
-    const fs  = getFirestore(app);
-    const db  = collection(fs, "messages");
+    const db  = collection(getFirestore(app), "messages");
     const MAX_MESSAGES = 50;
     const TEN_MIN = 10 * 60 * 1000;
 
     const messagesEl = document.getElementById("messages");
     const glowEl     = document.getElementById("bottom-glow");
-    const typingEl   = document.getElementById("typing-indicator");
 
-    /* ── scroll helpers ── */
     function isNearBottom() {
       return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
     }
+
     function scrollToBottom() {
       messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
     }
-    function showGlow() { glowEl.classList.add("active"); }
-    function hideGlow() { glowEl.classList.remove("active"); }
+
+    function showGlow() {
+      glowEl.classList.add("active");
+    }
+
+    function hideGlow() {
+      glowEl.classList.remove("active");
+    }
 
     messagesEl.addEventListener("scroll", () => {
       if (isNearBottom()) hideGlow();
     }, { passive: true });
 
-    /* ════════════════════════════════════════════
-       READ TRACKING
-       ────────────────────────────────────────────
-       - Use IntersectionObserver relative to #messages
-         so visibility is calculated correctly inside
-         the scroll container (not the window).
-       - Keep a Set of IDs already written to Firestore
-         so we don't spam writes, but reset it when
-         the page regains visibility (tab switch) so
-         we re-check on every re-open.
-       - Queue pending writes; flush with a small
-         debounce so rapid scrolling batches updates.
-    ════════════════════════════════════════════ */
-    const writtenToFirestore = new Set(); // IDs we've already persisted
-    const pendingWrites      = new Set(); // IDs queued but not yet written
-    let   writeTimer         = null;
-
-    async function flushPendingWrites() {
-      if (pendingWrites.size === 0) return;
-      const batch = [...pendingWrites];
-      pendingWrites.clear();
-      writeTimer = null;
-
-      for (const msgId of batch) {
-        try {
-          await updateDoc(doc(fs, "messages", msgId), {
-            readBy: arrayUnion(sessionId)
-          });
-          writtenToFirestore.add(msgId);
-        } catch (e) {
-          // Doc deleted or network issue — remove from written set so we retry
-          writtenToFirestore.delete(msgId);
-        }
-      }
-    }
-
-    function scheduleWrite(msgId) {
-      if (writtenToFirestore.has(msgId)) return; // already persisted
-      pendingWrites.add(msgId);
-      clearTimeout(writeTimer);
-      writeTimer = setTimeout(flushPendingWrites, 300); // debounce 300ms
-    }
-
-    /* IntersectionObserver: root = #messages scroll container */
-    const readObserver = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (!entry.isIntersecting) return;
-        const line = entry.target;
-        const sid  = line.getAttribute("data-sid");
-        if (!sid || sid === sessionId) return; // only track others' messages
-        scheduleWrite(line.id);
-      });
-    }, {
-      root: messagesEl,      // ← relative to scroll container, not window
-      threshold: 0.1         // 10% visible is enough
-    });
-
-    /* When tab comes back into focus, clear the in-memory written set
-       so messages are re-checked (in case we missed a write). */
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) {
-        // Re-queue anything not yet confirmed written
-        writtenToFirestore.clear();
-        // Re-observe all current messages
-        messagesEl.querySelectorAll(".msg-line[data-sid]").forEach(el => {
-          const sid = el.getAttribute("data-sid");
-          if (sid && sid !== sessionId) readObserver.observe(el);
-        });
-      }
-    });
-
-    /* Also trigger on any user interaction with the page */
-    ["click", "touchstart", "keydown", "mousemove"].forEach(evt => {
-      document.addEventListener(evt, () => {
-        // Re-queue unconfirmed writes on any interaction
-        if (pendingWrites.size > 0) flushPendingWrites();
-      }, { passive: true });
-    });
-
-    /* ── dot state ── */
-    function getDotState(data) {
-      if (data.sid !== sessionId) return "other";
-      const readBy = data.readBy || [];
-      return readBy.some(id => id !== sessionId) ? "seen" : "sent";
-    }
-
-    function updateDot(dotEl, state) {
-      dotEl.classList.remove("dot-sent", "dot-seen", "dot-other");
-      dotEl.classList.add("dot-" + state);
-    }
-
-    /* ── render message ── */
     function renderMessage(data, id, animate) {
-      const existing = document.getElementById(id);
-
-      if (existing) {
-        // Update dot only (handles "modified" events from readBy changes)
-        const dot = existing.querySelector(".msg-dot");
-        if (dot) updateDot(dot, getDotState(data));
-        return;
-      }
-
       const line = document.createElement("div");
-      line.id        = id;
+      line.id = id;
       line.className = "msg-line" + (animate ? " msg-new" : "");
-      line.setAttribute("data-sid", data.sid);
 
       const dot = document.createElement("span");
       dot.className = "msg-dot";
-      updateDot(dot, getDotState(data));
+      dot.setAttribute("data-own", data.sid === sessionId ? "1" : "0");
 
       const text = document.createElement("span");
-      text.className  = "msg-text";
+      text.className = "msg-text";
       text.textContent = data.text;
 
       line.appendChild(dot);
       line.appendChild(text);
-      messagesEl.insertBefore(line, typingEl);
-
-      // Start observing this element if it belongs to someone else
-      if (data.sid !== sessionId) {
-        readObserver.observe(line);
-      }
+      messagesEl.appendChild(line);
     }
 
-    /* ── messages listener ── */
     const q = query(db, orderBy("timestamp", "asc"), limit(MAX_MESSAGES));
     let firstLoad = true;
 
@@ -187,22 +83,28 @@
       const wasNearBottom = isNearBottom();
 
       snapshot.docChanges().forEach((change) => {
-        if (change.type === "added" || change.type === "modified") {
-          const data  = change.doc.data();
+        if (change.type === "added") {
+          const data = change.doc.data();
           const isOwn = data.sid === sessionId;
-          renderMessage(data, change.doc.id, change.type === "added" && !firstLoad);
 
-          if (change.type === "added" && !firstLoad) {
+          renderMessage(data, change.doc.id, !firstLoad);
+
+          if (!firstLoad) {
             if (isOwn) {
-              setTimeout(() => { scrollToBottom(); hideGlow(); }, 10);
+              // صاحب الجلسة أرسل رسالة — مرر دائماً للأسفل
+              setTimeout(() => {
+                scrollToBottom();
+                hideGlow();
+              }, 10);
             } else if (!wasNearBottom) {
+              // رسالة من شخص آخر والمستخدم بعيد عن الأسفل — أظهر التوهج
               showGlow();
             }
           }
         }
         if (change.type === "removed") {
           const el = document.getElementById(change.doc.id);
-          if (el) { readObserver.unobserve(el); el.remove(); }
+          if (el) el.remove();
         }
       });
 
@@ -212,68 +114,34 @@
           hideGlow();
         }, 10);
       }
+
       firstLoad = false;
     });
 
-    /* ── expire messages ── */
     async function enforceLimit() {
       const snap = await getDocs(query(db, orderBy("timestamp", "asc")));
       if (snap.size >= MAX_MESSAGES)
-        await deleteDoc(doc(fs, "messages", snap.docs[0].id));
+        await deleteDoc(doc(getFirestore(app), "messages", snap.docs[0].id));
     }
+
     async function deleteExpiredMessages() {
       const snap = await getDocs(query(db, orderBy("timestamp", "asc")));
-      const now  = Date.now();
-      const dels = [];
-      snap.forEach(d => {
-        const ts = d.data().timestamp;
+      const now = Date.now();
+      const deletions = [];
+      snap.forEach(docSnap => {
+        const ts = docSnap.data().timestamp;
         if (!ts) return;
-        const t = ts.toMillis ? ts.toMillis() : ts;
-        if (now - t > TEN_MIN) dels.push(deleteDoc(doc(fs, "messages", d.id)));
+        const msgTime = ts.toMillis ? ts.toMillis() : ts;
+        if (now - msgTime > TEN_MIN)
+          deletions.push(deleteDoc(doc(getFirestore(app), "messages", docSnap.id)));
       });
-      if (dels.length) await Promise.all(dels);
+      if (deletions.length) await Promise.all(deletions);
     }
+
     deleteExpiredMessages();
     setInterval(deleteExpiredMessages, 60 * 1000);
 
-    /* ── typing indicator ── */
-    const typingDocRef = doc(fs, "typing", "status");
-    let typingTimeout  = null;
-
-    async function setTyping(isTyping) {
-      try {
-        const snap   = await getDoc(typingDocRef);
-        const data   = snap.exists() ? snap.data() : {};
-        const others = data.sessions || {};
-        if (isTyping) { others[sessionId] = Date.now(); }
-        else          { delete others[sessionId]; }
-        await setDoc(typingDocRef, { sessions: others });
-      } catch (e) { console.error(e); }
-    }
-
-    onSnapshot(typingDocRef, (snap) => {
-      if (!snap.exists()) { typingEl.style.display = "none"; return; }
-      const sessions = snap.data().sessions || {};
-      const now      = Date.now();
-      const othersTyping = Object.entries(sessions).some(
-        ([sid, ts]) => sid !== sessionId && (now - ts) < 5000
-      );
-      typingEl.style.display = othersTyping ? "flex" : "none";
-      if (othersTyping && isNearBottom()) setTimeout(scrollToBottom, 10);
-    });
-
     const inputEl = document.getElementById("msg-input");
-
-    inputEl.addEventListener("input", () => {
-      if (inputEl.value.trim().length > 0) {
-        setTyping(true);
-        clearTimeout(typingTimeout);
-        typingTimeout = setTimeout(() => setTyping(false), 3000);
-      } else {
-        clearTimeout(typingTimeout);
-        setTyping(false);
-      }
-    });
 
     inputEl.addEventListener("focus", () => {
       setTimeout(scrollToBottom, 150);
@@ -282,42 +150,36 @@
 
     async function sendMessage() {
       const text = inputEl.value.trim();
-      if (!text || text.length > 500) return;
+      if (!text) return;
+      if (text.length > 500) return;
       inputEl.value = "";
-      clearTimeout(typingTimeout);
-      setTyping(false);
       try {
         await enforceLimit();
-        await addDoc(db, {
-          text,
-          sid:       sessionId,
-          timestamp: serverTimestamp(),
-          readBy:    []
-        });
-      } catch (err) { console.error(err); }
+        await addDoc(db, { text, sid: sessionId, timestamp: serverTimestamp() });
+      } catch (err) {
+        console.error(err);
+      }
       inputEl.focus();
     }
 
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     });
-
-    window.addEventListener("beforeunload", () => setTyping(false));
   </script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg:        #000000;
-      --bg2:       #111111;
-      --fg:        #ffffff;
-      --border:    #333333;
-      --accent:    #ffffff;
-      --font:      -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
-      --radius:    18px;
-      --dot-sent:  #4ade80;
-      --dot-seen:  #ffffff;
+      --bg:     #000000;
+      --bg2:    #111111;
+      --fg:     #ffffff;
+      --dim:    #888888;
+      --border: #333333;
+      --accent: #ffffff;
+      --font:   -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+      --radius: 18px;
+      --dot-own:   #ffffff;
       --dot-other: #555555;
     }
 
@@ -356,7 +218,10 @@
       overscroll-behavior: contain;
     }
 
-    #messages::before { content: ""; flex: 1; }
+    #messages::before {
+      content: "";
+      flex: 1;
+    }
 
     #messages::-webkit-scrollbar { width: 4px; }
     #messages::-webkit-scrollbar-track { background: transparent; }
@@ -371,34 +236,24 @@
       max-width: 90%;
     }
 
-    /* ── dot ── */
     .msg-dot {
       flex-shrink: 0;
-      width: 3.5px;
-      height: 3.5px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
+      background: var(--dot-other);
       position: relative;
       top: -0.05em;
-      transition: background 0.5s ease, box-shadow 0.5s ease;
+      transition: background 0.2s;
     }
 
-    .msg-dot.dot-sent {
-      background: var(--dot-sent);
-      box-shadow: 0 0 5px 1.5px rgba(74, 222, 128, 0.6);
-    }
-    .msg-dot.dot-seen {
-      background: var(--dot-seen);
-      box-shadow: none;
-    }
-    .msg-dot.dot-other {
-      background: var(--dot-other);
-      box-shadow: none;
-    }
+    .msg-dot[data-own="1"] { background: var(--dot-own); }
 
     @keyframes fadeUp {
       from { opacity: 0; transform: translateY(12px); }
       to   { opacity: 1; transform: translateY(0); }
     }
+
     .msg-new { animation: fadeUp 0.3s cubic-bezier(0.25, 1, 0.5, 1) forwards; }
 
     .msg-text {
@@ -408,30 +263,6 @@
       font-size: 1rem;
     }
 
-    /* ── typing indicator ── */
-    #typing-indicator {
-      display: none;
-      align-items: center;
-      gap: 4px;
-      padding: 0.15rem 0.4rem;
-      align-self: flex-start;
-    }
-
-    .typing-dot {
-      width: 6px; height: 6px;
-      border-radius: 50%;
-      background: var(--dot-other);
-      animation: bounce 1.2s ease-in-out infinite;
-    }
-    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
-    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
-
-    @keyframes bounce {
-      0%, 80%, 100% { transform: translateY(0);    opacity: 0.4; }
-      40%            { transform: translateY(-5px); opacity: 1;   }
-    }
-
-    /* ── input area ── */
     #input-area {
       flex-shrink: 0;
       padding: 0.75rem 1rem 1rem;
@@ -453,13 +284,15 @@
       transition: border-color 0.15s;
       min-height: 52px;
     }
-    #msg-input:focus    { border-color: var(--accent); }
+
+    #msg-input:focus { border-color: var(--accent); }
     #msg-input:disabled { opacity: 0.5; }
 
-    /* ── bottom glow ── */
     #bottom-glow {
       position: absolute;
-      bottom: 0; left: 0; right: 0;
+      bottom: 0;
+      left: 0;
+      right: 0;
       height: 120px;
       pointer-events: none;
       background: radial-gradient(ellipse 70% 60% at 50% 100%, rgba(255,255,255,0.07) 0%, transparent 100%);
@@ -467,7 +300,11 @@
       transition: opacity 0.6s ease;
       z-index: 10;
     }
-    #bottom-glow.active { opacity: 1; animation: glowPulse 2.4s ease-in-out infinite; }
+
+    #bottom-glow.active {
+      opacity: 1;
+      animation: glowPulse 2.4s ease-in-out infinite;
+    }
 
     @keyframes glowPulse {
       0%   { opacity: 0.5; }
@@ -481,14 +318,7 @@
 </head>
 <body>
   <div id="app">
-    <main id="messages" role="log" aria-live="polite">
-      <div id="typing-indicator" aria-label="...">
-        <span class="typing-dot"></span>
-        <span class="typing-dot"></span>
-        <span class="typing-dot"></span>
-      </div>
-    </main>
-
+    <main id="messages" role="log" aria-live="polite"></main>
 
 <div id="bottom-glow" aria-hidden="true"></div>
 
@@ -504,10 +334,11 @@
     enterkeyhint="send"
   />
 </footer>
+
   </div>
 
   <script>
-    ["dragover","dragenter","drop"].forEach(evt => {
+    ["dragover", "dragenter", "drop"].forEach(evt => {
       document.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); });
     });
   </script>
