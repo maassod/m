@@ -24,7 +24,6 @@
       appId:             "1:232360265495:web:8e54dad001ec00960ed952"
     };
 
-    /* معرّف الجلسة: يُنشأ مرة واحدة لكل متصفح ويبقى طوال الجلسة */
     let sessionId = sessionStorage.getItem("chat_sid");
     if (!sessionId) {
       sessionId = Math.random().toString(36).slice(2);
@@ -38,12 +37,15 @@
 
     const messagesEl = document.getElementById("messages");
 
+    function isNearBottom() {
+      return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+    }
+
     function renderMessage(data, id, animate) {
       const line = document.createElement("div");
       line.id = id;
       line.className = "msg-line" + (animate ? " msg-new" : "");
 
-      /* النقطة: بيضاء إذا من نفس الجلسة، رمادية إذا من جلسة أخرى */
       const dot = document.createElement("span");
       dot.className = "msg-dot";
       dot.setAttribute("data-own", data.sid === sessionId ? "1" : "0");
@@ -61,6 +63,8 @@
     let firstLoad = true;
 
     onSnapshot(q, (snapshot) => {
+      const wasNearBottom = isNearBottom();
+
       snapshot.docChanges().forEach((change) => {
         if (change.type === "added") {
           renderMessage(change.doc.data(), change.doc.id, !firstLoad);
@@ -70,8 +74,15 @@
           if (el) el.remove();
         }
       });
+
+      /* عند التحميل الأول أو إذا كان المستخدم في الأسفل → اسحب للأسفل */
+      if (firstLoad || wasNearBottom) {
+        setTimeout(() => {
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }, 10);
+      }
+
       firstLoad = false;
-      setTimeout(() => { messagesEl.scrollTop = messagesEl.scrollHeight; }, 10);
     });
 
     async function enforceLimit() {
@@ -106,7 +117,6 @@
       inputEl.value = "";
       try {
         await enforceLimit();
-        /* نحفظ معرّف الجلسة مع الرسالة */
         await addDoc(db, { text, sid: sessionId, timestamp: serverTimestamp() });
       } catch (err) {
         console.error(err);
@@ -118,7 +128,8 @@
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     });
 
-    messagesEl.addEventListener("touchstart", (e) => { e.preventDefault(); }, { passive: false });
+    /* زر الإرسال للجوال */
+    document.getElementById("send-btn").addEventListener("click", sendMessage);
   </script>
 
   <style>
@@ -126,16 +137,15 @@
 
     :root {
       --bg:     #000000;
-      --bg2:    #000000;
+      --bg2:    #111111;
       --fg:     #ffffff;
       --dim:    #888888;
       --border: #333333;
       --accent: #ffffff;
       --font:   -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
       --radius: 18px;
-
-      --dot-own:   #ffffff; /* نقطة رسائلك */
-      --dot-other: #555555; /* نقطة رسائل الآخرين */
+      --dot-own:   #ffffff;
+      --dot-other: #555555;
     }
 
     html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
@@ -160,16 +170,23 @@
       background: var(--bg);
     }
 
+    /* ✅ إزالة justify-content: flex-end حتى يعمل التمرير للأعلى */
     #messages {
       flex: 1;
       overflow-y: auto;
+      -webkit-overflow-scrolling: touch; /* تمرير ناعم على iOS */
       padding: 1rem 1rem 0.5rem;
       display: flex;
       flex-direction: column;
-      justify-content: flex-end;
       gap: 0.45rem;
       scroll-behavior: smooth;
-      overscroll-behavior: none;
+      overscroll-behavior: contain;
+    }
+
+    /* فراغ علوي لدفع الرسائل للأسفل عند قلّتها */
+    #messages::before {
+      content: "";
+      flex: 1;
     }
 
     #messages::-webkit-scrollbar { width: 4px; }
@@ -185,7 +202,6 @@
       max-width: 90%;
     }
 
-    /* النقطة */
     .msg-dot {
       flex-shrink: 0;
       width: 7px;
@@ -193,7 +209,7 @@
       border-radius: 50%;
       background: var(--dot-other);
       position: relative;
-      top: -0.05em; /* محاذاة بصرية مع النص */
+      top: -0.05em;
       transition: background 0.2s;
     }
 
@@ -217,10 +233,13 @@
       flex-shrink: 0;
       padding: 0.75rem 1rem 1rem;
       background: var(--bg);
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
     }
 
     #msg-input {
-      width: 100%;
+      flex: 1;
       background: var(--bg2);
       border: 1.5px solid var(--border);
       border-radius: var(--radius);
@@ -229,14 +248,31 @@
       font-family: var(--font);
       font-size: 1rem;
       padding: 0.75em 1.1em;
-      -webkit-user-drag: none;
       transition: border-color 0.15s;
       min-height: 52px;
-      display: block;
     }
 
     #msg-input:focus { border-color: var(--accent); }
     #msg-input:disabled { opacity: 0.5; }
+
+    #send-btn {
+      flex-shrink: 0;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 1.5px solid var(--border);
+      background: var(--bg2);
+      color: var(--fg);
+      font-size: 1.2rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, border-color 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    #send-btn:active { background: var(--border); }
 
     body { -webkit-user-drag: none; }
   </style>
@@ -256,6 +292,7 @@
         spellcheck="false"
         enterkeyhint="send"
       />
+      <button id="send-btn" aria-label="إرسال">↑</button>
     </footer>
   </div>
 
