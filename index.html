@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8" />
@@ -54,10 +55,20 @@
     }, { passive: true });
 
     /* ════════════════════════════════════════════
-       READ TRACKING (نظام تسجيل المشاهدة المطور)
+       READ TRACKING
+       ────────────────────────────────────────────
+       - Use IntersectionObserver relative to #messages
+         so visibility is calculated correctly inside
+         the scroll container (not the window).
+       - Keep a Set of IDs already written to Firestore
+         so we don't spam writes, but reset it when
+         the page regains visibility (tab switch) so
+         we re-check on every re-open.
+       - Queue pending writes; flush with a small
+         debounce so rapid scrolling batches updates.
     ════════════════════════════════════════════ */
-    const writtenToFirestore = new Set(); // المعرفات التي تم حفظها بالفعل
-    const pendingWrites      = new Set(); // المعرفات قيد الانتظار
+    const writtenToFirestore = new Set(); // IDs we've already persisted
+    const pendingWrites      = new Set(); // IDs queued but not yet written
     let   writeTimer         = null;
 
     async function flushPendingWrites() {
@@ -73,66 +84,59 @@
           });
           writtenToFirestore.add(msgId);
         } catch (e) {
-          // في حال حذفت الرسالة أو انقطع الاتصال
+          // Doc deleted or network issue — remove from written set so we retry
           writtenToFirestore.delete(msgId);
         }
       }
     }
 
     function scheduleWrite(msgId) {
-      if (writtenToFirestore.has(msgId)) return; 
+      if (writtenToFirestore.has(msgId)) return; // already persisted
       pendingWrites.add(msgId);
       clearTimeout(writeTimer);
-      writeTimer = setTimeout(flushPendingWrites, 300); // Debounce 300ms
+      writeTimer = setTimeout(flushPendingWrites, 300); // debounce 300ms
     }
 
-    // دالة تقوم بفحص وقراءة كل الرسائل الموجودة حالياً الخاصة بالطرف الآخر
-    function readAllVisibleMessages() {
-      messagesEl.querySelectorAll(".msg-line[data-sid]").forEach(el => {
-        const sid = el.getAttribute("data-sid");
-        if (sid && sid !== sessionId) {
-          scheduleWrite(el.id);
-        }
-      });
-    }
-
-    /* IntersectionObserver: لتتبع الرسائل عند التمرير */
+    /* IntersectionObserver: root = #messages scroll container */
     const readObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (!entry.isIntersecting) return;
         const line = entry.target;
         const sid  = line.getAttribute("data-sid");
-        if (!sid || sid === sessionId) return; 
+        if (!sid || sid === sessionId) return; // only track others' messages
         scheduleWrite(line.id);
       });
     }, {
-      root: messagesEl,      
-      threshold: 0.1         
+      root: messagesEl,      // ← relative to scroll container, not window
+      threshold: 0.1         // 10% visible is enough
     });
 
-    /* عند العودة للتبويب */
+    /* When tab comes back into focus, clear the in-memory written set
+       so messages are re-checked (in case we missed a write). */
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) {
+        // Re-queue anything not yet confirmed written
         writtenToFirestore.clear();
-        readAllVisibleMessages();
+        // Re-observe all current messages
+        messagesEl.querySelectorAll(".msg-line[data-sid]").forEach(el => {
+          const sid = el.getAttribute("data-sid");
+          if (sid && sid !== sessionId) readObserver.observe(el);
+        });
       }
     });
 
-    /* 🔥 التعديل الجوهري: تحديث وقراءة الرسائل فوراً عند حدوث أي تفاعل من المستخدم على الشاشة */
+    /* Also trigger on any user interaction with the page */
     ["click", "touchstart", "keydown", "mousemove"].forEach(evt => {
       document.addEventListener(evt, () => {
-        readAllVisibleMessages(); // قراءة الرسائل المعروضة فوراً عند التفاعل
-        if (pendingWrites.size > 0) {
-          flushPendingWrites();
-        }
+        // Re-queue unconfirmed writes on any interaction
+        if (pendingWrites.size > 0) flushPendingWrites();
       }, { passive: true });
     });
 
     /* ── dot state ── */
     function getDotState(data) {
-      if (data.sid !== sessionId) return "other"; // رسائل الطرف الآخر لونها رمادي دائماً عندك
+      if (data.sid !== sessionId) return "other";
       const readBy = data.readBy || [];
-      // إذا قام أي مستخدم آخر بقراءتها تتحول للأبيض (seen)، وإلا تظل خضراء (sent)
       return readBy.some(id => id !== sessionId) ? "seen" : "sent";
     }
 
@@ -146,6 +150,7 @@
       const existing = document.getElementById(id);
 
       if (existing) {
+        // Update dot only (handles "modified" events from readBy changes)
         const dot = existing.querySelector(".msg-dot");
         if (dot) updateDot(dot, getDotState(data));
         return;
@@ -168,6 +173,7 @@
       line.appendChild(text);
       messagesEl.insertBefore(line, typingEl);
 
+      // Start observing this element if it belongs to someone else
       if (data.sid !== sessionId) {
         readObserver.observe(line);
       }
@@ -471,6 +477,7 @@
 
     body { -webkit-user-drag: none; }
   </style>
+
 </head>
 <body>
   <div id="app">
@@ -482,20 +489,21 @@
       </div>
     </main>
 
-    <div id="bottom-glow" aria-hidden="true"></div>
 
-    <footer id="input-area">
-      <input
-        id="msg-input"
-        type="text"
-        maxlength="500"
-        autocomplete="off"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-        enterkeyhint="send"
-      />
-    </footer>
+<div id="bottom-glow" aria-hidden="true"></div>
+
+<footer id="input-area">
+  <input
+    id="msg-input"
+    type="text"
+    maxlength="500"
+    autocomplete="off"
+    autocorrect="off"
+    autocapitalize="off"
+    spellcheck="false"
+    enterkeyhint="send"
+  />
+</footer>
   </div>
 
   <script>
@@ -503,5 +511,6 @@
       document.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); });
     });
   </script>
+
 </body>
 </html>
