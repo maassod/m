@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8" />
@@ -75,7 +74,6 @@
         }
       });
 
-      /* عند التحميل الأول أو إذا كان المستخدم في الأسفل → اسحب للأسفل */
       if (firstLoad || wasNearBottom) {
         setTimeout(() => {
           messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -127,9 +125,6 @@
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     });
-
-    /* زر الإرسال للجوال */
-    document.getElementById("send-btn").addEventListener("click", sendMessage);
   </script>
 
   <style>
@@ -170,11 +165,10 @@
       background: var(--bg);
     }
 
-    /* ✅ إزالة justify-content: flex-end حتى يعمل التمرير للأعلى */
     #messages {
       flex: 1;
       overflow-y: auto;
-      -webkit-overflow-scrolling: touch; /* تمرير ناعم على iOS */
+      -webkit-overflow-scrolling: touch;
       padding: 1rem 1rem 0.5rem;
       display: flex;
       flex-direction: column;
@@ -183,7 +177,6 @@
       overscroll-behavior: contain;
     }
 
-    /* فراغ علوي لدفع الرسائل للأسفل عند قلّتها */
     #messages::before {
       content: "";
       flex: 1;
@@ -234,7 +227,6 @@
       padding: 0.75rem 1rem 1rem;
       background: var(--bg);
       display: flex;
-      gap: 0.5rem;
       align-items: center;
     }
 
@@ -255,25 +247,6 @@
     #msg-input:focus { border-color: var(--accent); }
     #msg-input:disabled { opacity: 0.5; }
 
-    #send-btn {
-      flex-shrink: 0;
-      width: 44px;
-      height: 44px;
-      border-radius: 50%;
-      border: 1.5px solid var(--border);
-      background: var(--bg2);
-      color: var(--fg);
-      font-size: 1.2rem;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s, border-color 0.15s;
-      -webkit-tap-highlight-color: transparent;
-    }
-
-    #send-btn:active { background: var(--border); }
-
     body { -webkit-user-drag: none; }
   </style>
 
@@ -292,7 +265,6 @@
         spellcheck="false"
         enterkeyhint="send"
       />
-      <button id="send-btn" aria-label="إرسال">↑</button>
     </footer>
   </div>
 
