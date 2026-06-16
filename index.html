@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8" />
@@ -23,6 +24,13 @@
       appId:             "1:232360265495:web:8e54dad001ec00960ed952"
     };
 
+    /* معرّف الجلسة: يُنشأ مرة واحدة لكل متصفح ويبقى طوال الجلسة */
+    let sessionId = sessionStorage.getItem("chat_sid");
+    if (!sessionId) {
+      sessionId = Math.random().toString(36).slice(2);
+      sessionStorage.setItem("chat_sid", sessionId);
+    }
+
     const app = initializeApp(firebaseConfig);
     const db  = collection(getFirestore(app), "messages");
     const MAX_MESSAGES = 50;
@@ -30,51 +38,48 @@
 
     const messagesEl = document.getElementById("messages");
 
-    /* رسم رسالة مع إعطائها ID للتحكم بها وإضافة أنيميشن ظهور سلس */
     function renderMessage(data, id, animate) {
       const line = document.createElement("div");
-      line.id = id; // إضافة المعرف لسهولة الحذف لاحقاً
+      line.id = id;
       line.className = "msg-line" + (animate ? " msg-new" : "");
+
+      /* النقطة: بيضاء إذا من نفس الجلسة، رمادية إذا من جلسة أخرى */
+      const dot = document.createElement("span");
+      dot.className = "msg-dot";
+      dot.setAttribute("data-own", data.sid === sessionId ? "1" : "0");
+
       const text = document.createElement("span");
       text.className = "msg-text";
       text.textContent = data.text;
+
+      line.appendChild(dot);
       line.appendChild(text);
       messagesEl.appendChild(line);
     }
 
-    /* الاستماع الفوري باستخدام docChanges لتحديث ذكي وسلس */
     const q = query(db, orderBy("timestamp", "asc"), limit(MAX_MESSAGES));
     let firstLoad = true;
 
     onSnapshot(q, (snapshot) => {
       snapshot.docChanges().forEach((change) => {
         if (change.type === "added") {
-          // إضافة الرسالة الجديدة فقط
           renderMessage(change.doc.data(), change.doc.id, !firstLoad);
         }
         if (change.type === "removed") {
-          // إزالة الرسالة المحذوفة من الواجهة بنعومة
           const el = document.getElementById(change.doc.id);
           if (el) el.remove();
         }
       });
-      
       firstLoad = false;
-      
-      /* التمرير للأسفل بنعومة بعد إضافة العنصر في الواجهة */
-      setTimeout(() => {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }, 10);
+      setTimeout(() => { messagesEl.scrollTop = messagesEl.scrollHeight; }, 10);
     });
 
-    /* حذف الأقدم عند تجاوز الحد */
     async function enforceLimit() {
       const snap = await getDocs(query(db, orderBy("timestamp", "asc")));
       if (snap.size >= MAX_MESSAGES)
         await deleteDoc(doc(getFirestore(app), "messages", snap.docs[0].id));
     }
 
-    /* حذف الرسائل منتهية الصلاحية (10 دقائق) */
     async function deleteExpiredMessages() {
       const snap = await getDocs(query(db, orderBy("timestamp", "asc")));
       const now = Date.now();
@@ -98,32 +103,22 @@
       const text = inputEl.value.trim();
       if (!text) return;
       if (text.length > 500) return;
-
-      /* لا نعطّل الحقل حتى لا يختفي الكيبورد */
       inputEl.value = "";
-
       try {
         await enforceLimit();
-        await addDoc(db, { text, timestamp: serverTimestamp() });
+        /* نحفظ معرّف الجلسة مع الرسالة */
+        await addDoc(db, { text, sid: sessionId, timestamp: serverTimestamp() });
       } catch (err) {
         console.error(err);
       }
-
-      /* إبقاء التركيز على الحقل دائماً */
       inputEl.focus();
     }
 
     inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-      }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     });
 
-    /* منع إخفاء الكيبورد عند لمس منطقة الرسائل */
-    messagesEl.addEventListener("touchstart", (e) => {
-      e.preventDefault();
-    }, { passive: false });
+    messagesEl.addEventListener("touchstart", (e) => { e.preventDefault(); }, { passive: false });
   </script>
 
   <style>
@@ -133,17 +128,17 @@
       --bg:     #000000;
       --bg2:    #000000;
       --fg:     #ffffff;
-      --dim:    #888888; 
+      --dim:    #888888;
       --border: #333333;
       --accent: #ffffff;
       --font:   -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
       --radius: 18px;
+
+      --dot-own:   #ffffff; /* نقطة رسائلك */
+      --dot-other: #555555; /* نقطة رسائل الآخرين */
     }
 
-    html {
-      touch-action: manipulation;
-      -webkit-text-size-adjust: 100%;
-    }
+    html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
 
     html, body {
       height: 100%;
@@ -165,7 +160,6 @@
       background: var(--bg);
     }
 
-    /* الرسائل: flex-end يجعل الأولى في الأسفل والفراغ في الأعلى */
     #messages {
       flex: 1;
       overflow-y: auto;
@@ -174,7 +168,7 @@
       flex-direction: column;
       justify-content: flex-end;
       gap: 0.45rem;
-      scroll-behavior: smooth; /* يضمن انزلاقاً ناعماً عند التمرير */
+      scroll-behavior: smooth;
       overscroll-behavior: none;
     }
 
@@ -182,23 +176,35 @@
     #messages::-webkit-scrollbar-track { background: transparent; }
     #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
 
-    /* رسالة بدون إطار */
     .msg-line {
       display: inline-flex;
+      align-items: baseline;
       align-self: flex-start;
+      gap: 0.45em;
       padding: 0.15rem 0.4rem;
       max-width: 90%;
     }
 
-    /* أنيميشن ظهور الرسالة الجديدة: تم زيادة المسافة والمدة لنعومة أكبر */
+    /* النقطة */
+    .msg-dot {
+      flex-shrink: 0;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--dot-other);
+      position: relative;
+      top: -0.05em; /* محاذاة بصرية مع النص */
+      transition: background 0.2s;
+    }
+
+    .msg-dot[data-own="1"] { background: var(--dot-own); }
+
     @keyframes fadeUp {
       from { opacity: 0; transform: translateY(12px); }
       to   { opacity: 1; transform: translateY(0); }
     }
 
-    .msg-new {
-      animation: fadeUp 0.3s cubic-bezier(0.25, 1, 0.5, 1) forwards;
-    }
+    .msg-new { animation: fadeUp 0.3s cubic-bezier(0.25, 1, 0.5, 1) forwards; }
 
     .msg-text {
       word-break: break-word;
@@ -207,7 +213,6 @@
       font-size: 1rem;
     }
 
-    /* منطقة الإدخال */
     #input-area {
       flex-shrink: 0;
       padding: 0.75rem 1rem 1rem;
