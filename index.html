@@ -30,9 +30,10 @@
 
     const messagesEl = document.getElementById("messages");
 
-    /* رسم رسالة مع أنيميشن ظهور سريع */
-    function renderMessage(data, animate) {
+    /* رسم رسالة مع إعطائها ID للتحكم بها وإضافة أنيميشن ظهور سلس */
+    function renderMessage(data, id, animate) {
       const line = document.createElement("div");
+      line.id = id; // إضافة المعرف لسهولة الحذف لاحقاً
       line.className = "msg-line" + (animate ? " msg-new" : "");
       const text = document.createElement("span");
       text.className = "msg-text";
@@ -41,18 +42,29 @@
       messagesEl.appendChild(line);
     }
 
-    /* الاستماع الفوري */
+    /* الاستماع الفوري باستخدام docChanges لتحديث ذكي وسلس */
     const q = query(db, orderBy("timestamp", "asc"), limit(MAX_MESSAGES));
     let firstLoad = true;
 
     onSnapshot(q, (snapshot) => {
-      messagesEl.innerHTML = "";
-      snapshot.forEach((docSnap, i) => {
-        renderMessage(docSnap.data(), !firstLoad);
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === "added") {
+          // إضافة الرسالة الجديدة فقط
+          renderMessage(change.doc.data(), change.doc.id, !firstLoad);
+        }
+        if (change.type === "removed") {
+          // إزالة الرسالة المحذوفة من الواجهة بنعومة
+          const el = document.getElementById(change.doc.id);
+          if (el) el.remove();
+        }
       });
+      
       firstLoad = false;
-      /* الفراغ في الأعلى: آخر رسالة تظهر في الأسفل */
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      
+      /* التمرير للأسفل بنعومة بعد إضافة العنصر في الواجهة */
+      setTimeout(() => {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }, 10);
     });
 
     /* حذف الأقدم عند تجاوز الحد */
@@ -118,12 +130,12 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg:     #000000; /* أسود 100% للخلفية الأساسية */
-      --bg2:    #000000; /* أسود 100% لحقل الإدخال */
-      --fg:     #ffffff; /* أبيض ناصع للنصوص لقراءة ممتازة */
+      --bg:     #000000;
+      --bg2:    #000000;
+      --fg:     #ffffff;
       --dim:    #888888; 
-      --border: #333333; /* رمادي غامق جداً للحدود الافتراضية */
-      --accent: #ffffff; /* أبيض للتركيز والحدود النشطة */
+      --border: #333333;
+      --accent: #ffffff;
       --font:   -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
       --radius: 18px;
     }
@@ -162,7 +174,7 @@
       flex-direction: column;
       justify-content: flex-end;
       gap: 0.45rem;
-      scroll-behavior: smooth;
+      scroll-behavior: smooth; /* يضمن انزلاقاً ناعماً عند التمرير */
       overscroll-behavior: none;
     }
 
@@ -178,14 +190,14 @@
       max-width: 90%;
     }
 
-    /* أنيميشن ظهور الرسالة الجديدة */
+    /* أنيميشن ظهور الرسالة الجديدة: تم زيادة المسافة والمدة لنعومة أكبر */
     @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(6px); }
+      from { opacity: 0; transform: translateY(12px); }
       to   { opacity: 1; transform: translateY(0); }
     }
 
     .msg-new {
-      animation: fadeUp 0.18s ease-out forwards;
+      animation: fadeUp 0.3s cubic-bezier(0.25, 1, 0.5, 1) forwards;
     }
 
     .msg-text {
